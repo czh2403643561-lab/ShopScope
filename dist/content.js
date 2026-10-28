@@ -284,49 +284,75 @@
 
   // src/temu-product-search.ts
   var BUTTON_ID = "shopscope-temu-image-search-button";
-  var PRODUCT_PATH = /(?:^|\/)(?:product|goods|product_image|product-detail)\//i;
-  var IMAGE_ATTRIBUTES = ["src", "srcset", "data-src", "data-original", "data-lazy-src"];
+  var IMAGE_PATH = /(?:^|\/)(?:product|goods|product_image|product-detail|local-goods-img)\//i;
+  var IMAGE_ATTRIBUTES = ["src", "srcset", "data-src", "data-original", "data-lazy-src", "poster", "data-poster"];
   var CARD_SELECTORS = [
     "[data-goods-id]",
     "[data-product-id]",
     '[class*="product-item"]',
     '[class*="goods-item"]',
+    '[class*="goods-container"]',
+    '[class*="product-card"]',
+    "._6q6qVUF5",
     "._3nm8E1o6",
     ".ueQ3rCYG"
   ].join(",");
   var host2;
-  var activeImage;
-  var hoveredImage;
+  var activeCandidate;
   var pointerX = 0;
   var pointerY = 0;
   var refreshScheduled = false;
+  function validImageUrl(candidate) {
+    if (!candidate) return "";
+    try {
+      const url = new URL(candidate, location.href);
+      return url.protocol === "https:" && /(^|\.)kwcdn\.com$/i.test(url.hostname) && IMAGE_PATH.test(url.pathname) ? url.href : "";
+    } catch {
+      return "";
+    }
+  }
   function imageUrl(image) {
-    const candidates = [
-      image.currentSrc,
-      image.getAttribute("src"),
-      image.getAttribute("data-src"),
-      image.getAttribute("data-original"),
-      image.getAttribute("data-lazy-src")
-    ];
-    return candidates.find((candidate) => {
-      if (!candidate) return false;
-      try {
-        const url = new URL(candidate, location.href);
-        return url.protocol === "https:" && /(^|\.)kwcdn\.com$/i.test(url.hostname) && PRODUCT_PATH.test(url.pathname);
-      } catch {
-        return false;
-      }
-    }) ?? "";
+    const candidates = [image.currentSrc, image.getAttribute("src"), image.getAttribute("data-src"), image.getAttribute("data-original"), image.getAttribute("data-lazy-src")];
+    return candidates.map(validImageUrl).find(Boolean) ?? "";
   }
-  function productImage(image) {
-    return image.isConnected && Boolean(imageUrl(image));
+  function mediaUrl(media) {
+    if (media instanceof HTMLImageElement) return imageUrl(media);
+    return validImageUrl(media.poster || media.getAttribute("data-poster"));
   }
-  function productCard(image) {
-    return image.closest(CARD_SELECTORS) ?? image.parentElement ?? image;
+  function cardFor(element) {
+    const card = element.closest(CARD_SELECTORS);
+    if (card) return card;
+    const productLink = element.closest('a[href*="-g-"]');
+    if (productLink) return productLink;
+    let current = element instanceof HTMLElement ? element : element.parentElement;
+    for (let depth = 0; current && depth < 5; depth++, current = current.parentElement) {
+      if (current.querySelector("img,video")) return current;
+    }
+    return element.parentElement ?? element;
   }
-  function productId(image, card, rawImageUrl) {
-    const anchors = [image.closest("a"), ...card.querySelectorAll("a")];
-    for (const anchor of anchors) {
+  function coversPoint(element, x, y) {
+    const rect = element.getBoundingClientRect();
+    return rect.width >= 70 && rect.height >= 70 && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+  }
+  function candidateFor(media, card) {
+    const image = mediaUrl(media);
+    return image && media.isConnected ? { media, imageUrl: image, card } : void 0;
+  }
+  function resolveCandidate(target, x, y) {
+    if (!target || host2?.contains(target)) return void 0;
+    const card = cardFor(target);
+    if ((target instanceof HTMLImageElement || target instanceof HTMLVideoElement) && coversPoint(target, x, y)) {
+      const direct = candidateFor(target, card);
+      if (direct) return direct;
+    }
+    const media = [...card.querySelectorAll("img,video")].filter((item) => (item instanceof HTMLImageElement || item instanceof HTMLVideoElement) && coversPoint(item, x, y));
+    const ranked = media.map((item) => candidateFor(item, card)).filter((item) => Boolean(item));
+    ranked.sort((a, b) => Number(b.media instanceof HTMLVideoElement) - Number(a.media instanceof HTMLVideoElement));
+    return ranked[0];
+  }
+  function productId(candidate) {
+    const links = [candidate.media.closest("a"), ...candidate.card.querySelectorAll("a")];
+    for (const anchor of links) {
       if (!anchor?.href) continue;
       try {
         const url = new URL(anchor.href, location.href);
@@ -334,29 +360,28 @@
           const value2 = url.searchParams.get(key);
           if (value2) return value2.slice(0, 120);
         }
-        const match = url.pathname.match(/(?:goods|product)[^\d]*(\d{6,})/i);
+        const match = url.pathname.match(/(?:goods|product)[^\d]*(\d{6,})/i) || url.pathname.match(/-g-(\d+)/i);
         if (match) return match[1];
       } catch {
       }
     }
-    return image.dataset.goodsId || image.dataset.productId || rawImageUrl.slice(-80) || `temu-${Date.now()}`;
+    const image = candidate.media instanceof HTMLImageElement ? candidate.media : void 0;
+    return image?.dataset.goodsId || image?.dataset.productId || candidate.imageUrl.slice(-80) || `temu-${Date.now()}`;
   }
-  function productSnapshot(image) {
-    const rawImageUrl = imageUrl(image);
-    if (!image.isConnected || !rawImageUrl) return void 0;
-    const card = productCard(image);
-    const canonicalImageUrl = canonicalizeUrl(rawImageUrl);
-    if (!canonicalImageUrl) return void 0;
-    const alt = cleanText(image.alt);
-    const title = alt && alt.toLowerCase() !== "image" ? alt : cleanText(image.getAttribute("title") || card.querySelector("[title]")?.getAttribute("title") || card.textContent).slice(0, 180) || "Temu\u5546\u54C1";
-    return { product_id: productId(image, card, canonicalImageUrl), title, image_url: canonicalImageUrl };
+  function productSnapshot(candidate) {
+    const canonicalImageUrl = canonicalizeUrl(candidate.imageUrl);
+    if (!canonicalImageUrl || !candidate.media.isConnected) return void 0;
+    const image = candidate.media instanceof HTMLImageElement ? candidate.media : void 0;
+    const alt = cleanText(image?.alt || candidate.media.getAttribute("aria-label"));
+    const title = alt && alt.toLowerCase() !== "image" ? alt : cleanText(candidate.media.getAttribute("title") || candidate.card.querySelector("[title]")?.getAttribute("title") || candidate.card.textContent).slice(0, 180) || "Temu\u5546\u54C1";
+    return { product_id: productId(candidate), title, image_url: canonicalImageUrl };
   }
   function buttonWidth() {
     return host2?.shadowRoot?.querySelector("button")?.getBoundingClientRect().width || 112;
   }
-  function positionButton(image) {
+  function positionButton(candidate) {
     if (!host2) return;
-    const rect = image.getBoundingClientRect();
+    const rect = candidate.media.getBoundingClientRect();
     if (rect.width < 70 || rect.height < 70 || rect.bottom < 0 || rect.right < 0 || rect.top > innerHeight || rect.left > innerWidth) {
       hideButton();
       return;
@@ -370,29 +395,23 @@
     if (!(target instanceof Node) || !host2) return false;
     return target === host2 || host2.contains(target) || target.getRootNode() === host2.shadowRoot;
   }
-  function hideButton(clearHover = false) {
+  function hideButton() {
     if (host2 && !host2.matches(":focus-within")) host2.style.display = "none";
-    activeImage = void 0;
-    if (clearHover) hoveredImage = void 0;
+    activeCandidate = void 0;
   }
-  function showForImage(image) {
-    hoveredImage = image;
-    if (!productImage(image)) {
-      if (activeImage) hideButton();
+  function showCandidate(candidate) {
+    if (!candidate) {
+      hideButton();
       return;
     }
-    activeImage = image;
-    positionButton(image);
+    activeCandidate = candidate;
+    positionButton(candidate);
   }
   function refreshUnderPointer() {
     refreshScheduled = false;
-    if (isButtonTarget(document.elementFromPoint(pointerX, pointerY))) return;
     const target = document.elementFromPoint(pointerX, pointerY);
-    if (target instanceof HTMLImageElement) {
-      showForImage(target);
-    } else {
-      hideButton(true);
-    }
+    if (isButtonTarget(target)) return;
+    showCandidate(resolveCandidate(target, pointerX, pointerY));
   }
   function schedulePointerRefresh() {
     if (refreshScheduled) return;
@@ -416,26 +435,33 @@
     button.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      const product = activeImage && productSnapshot(activeImage);
+      const product = activeCandidate && productSnapshot(activeCandidate);
       if (product) void startSourcingSearch(product);
     });
-    host2.addEventListener("pointerleave", () => hideButton(true));
     shadow2.append(style, button);
     document.documentElement.appendChild(host2);
   }
-  function onPointerOver(event) {
-    if (event.target instanceof HTMLImageElement) showForImage(event.target);
-  }
-  function onPointerMove(event) {
+  function updatePointer(event) {
     pointerX = event.clientX;
     pointerY = event.clientY;
-    if (event.target instanceof HTMLImageElement) showForImage(event.target);
+  }
+  function onPointerOver(event) {
+    updatePointer(event);
+    if (isButtonTarget(event.target)) return;
+    showCandidate(resolveCandidate(event.target instanceof Element ? event.target : null, pointerX, pointerY));
+  }
+  function onPointerMove(event) {
+    updatePointer(event);
+    if (isButtonTarget(event.target)) return;
+    showCandidate(resolveCandidate(event.target instanceof Element ? event.target : null, pointerX, pointerY));
   }
   function onPointerOut(event) {
-    if (event.target === hoveredImage && !isButtonTarget(event.relatedTarget)) hideButton(true);
+    updatePointer(event);
+    if (isButtonTarget(event.relatedTarget)) return;
+    schedulePointerRefresh();
   }
   function onFocusIn(event) {
-    if (event.target instanceof HTMLImageElement) showForImage(event.target);
+    if (event.target instanceof Element) showCandidate(resolveCandidate(event.target, pointerX, pointerY));
   }
   function onTogglePanel(message) {
     if (message?.type !== "TOGGLE_SHOP_SCOPE_PANEL") return false;
@@ -448,14 +474,10 @@
     document.addEventListener("pointermove", onPointerMove, true);
     document.addEventListener("pointerout", onPointerOut, true);
     document.addEventListener("focusin", onFocusIn, true);
-    document.addEventListener("focusout", onPointerOut, true);
     window.addEventListener("scroll", schedulePointerRefresh, true);
     window.addEventListener("resize", schedulePointerRefresh);
     const observer = new MutationObserver((records) => {
-      if (hoveredImage && records.some((record) => record.target === hoveredImage && IMAGE_ATTRIBUTES.includes(record.attributeName ?? ""))) {
-        showForImage(hoveredImage);
-      }
-      if (records.some((record) => record.type === "childList")) schedulePointerRefresh();
+      if (records.some((record) => record.type === "childList" || IMAGE_ATTRIBUTES.includes(record.attributeName ?? ""))) schedulePointerRefresh();
     });
     observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: IMAGE_ATTRIBUTES });
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
