@@ -302,6 +302,27 @@
   var pointerX = 0;
   var pointerY = 0;
   var refreshScheduled = false;
+  var pageMedia = /* @__PURE__ */ new Set();
+  function isProductMedia(element) {
+    return element instanceof HTMLImageElement || element instanceof HTMLVideoElement;
+  }
+  function updateMediaTree(node, add) {
+    if (!(node instanceof Element)) return;
+    const update = (element) => {
+      if (!isProductMedia(element)) return;
+      if (add) pageMedia.add(element);
+      else pageMedia.delete(element);
+    };
+    update(node);
+    node.querySelectorAll("img,video").forEach(update);
+  }
+  function updateMediaRegistry(records) {
+    for (const record of records) {
+      if (record.type !== "childList") continue;
+      record.addedNodes.forEach((node) => updateMediaTree(node, true));
+      record.removedNodes.forEach((node) => updateMediaTree(node, false));
+    }
+  }
   function validImageUrl(candidate) {
     if (!candidate) return "";
     try {
@@ -338,6 +359,29 @@
     const image = mediaUrl(media);
     return image && media.isConnected ? { media, imageUrl: image, card } : void 0;
   }
+  function candidateAtPoint(x, y) {
+    const hitOrder = /* @__PURE__ */ new Map();
+    document.elementsFromPoint(x, y).forEach((element, index) => {
+      if (isProductMedia(element)) hitOrder.set(element, index);
+    });
+    const candidates = [];
+    for (const media of pageMedia) {
+      if (!media.isConnected) {
+        pageMedia.delete(media);
+        continue;
+      }
+      if (!mediaUrl(media)) continue;
+      if (!coversPoint(media, x, y)) continue;
+      const style = getComputedStyle(media);
+      if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) continue;
+      const candidate = candidateFor(media, cardFor(media));
+      if (!candidate) continue;
+      const rect = media.getBoundingClientRect();
+      candidates.push({ candidate, hitOrder: hitOrder.get(media) ?? Number.MAX_SAFE_INTEGER, area: rect.width * rect.height });
+    }
+    candidates.sort((a, b) => a.hitOrder - b.hitOrder || a.area - b.area);
+    return candidates[0]?.candidate;
+  }
   function resolveCandidate(target, x, y) {
     if (!target || host2?.contains(target)) return void 0;
     const card = cardFor(target);
@@ -348,7 +392,7 @@
     const media = [...card.querySelectorAll("img,video")].filter((item) => (item instanceof HTMLImageElement || item instanceof HTMLVideoElement) && coversPoint(item, x, y));
     const ranked = media.map((item) => candidateFor(item, card)).filter((item) => Boolean(item));
     ranked.sort((a, b) => Number(b.media instanceof HTMLVideoElement) - Number(a.media instanceof HTMLVideoElement));
-    return ranked[0];
+    return ranked[0] ?? candidateAtPoint(x, y);
   }
   function productId(candidate) {
     const links = [candidate.media.closest("a"), ...candidate.card.querySelectorAll("a")];
@@ -453,7 +497,7 @@
   function onPointerMove(event) {
     updatePointer(event);
     if (isButtonTarget(event.target)) return;
-    showCandidate(resolveCandidate(event.target instanceof Element ? event.target : null, pointerX, pointerY));
+    schedulePointerRefresh();
   }
   function onPointerOut(event) {
     updatePointer(event);
@@ -470,6 +514,7 @@
   }
   function installTemuProductSearch() {
     installButton();
+    updateMediaTree(document.documentElement, true);
     document.addEventListener("pointerover", onPointerOver, true);
     document.addEventListener("pointermove", onPointerMove, true);
     document.addEventListener("pointerout", onPointerOut, true);
@@ -477,6 +522,7 @@
     window.addEventListener("scroll", schedulePointerRefresh, true);
     window.addEventListener("resize", schedulePointerRefresh);
     const observer = new MutationObserver((records) => {
+      updateMediaRegistry(records);
       if (records.some((record) => record.type === "childList" || IMAGE_ATTRIBUTES.includes(record.attributeName ?? ""))) schedulePointerRefresh();
     });
     observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: IMAGE_ATTRIBUTES });

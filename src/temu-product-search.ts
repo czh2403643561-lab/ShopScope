@@ -17,6 +17,30 @@ let activeCandidate: ProductCandidate | undefined;
 let pointerX = 0;
 let pointerY = 0;
 let refreshScheduled = false;
+const pageMedia = new Set<ProductMedia>();
+
+function isProductMedia(element: Element): element is ProductMedia {
+  return element instanceof HTMLImageElement || element instanceof HTMLVideoElement;
+}
+
+function updateMediaTree(node: Node, add: boolean): void {
+  if (!(node instanceof Element)) return;
+  const update = (element: Element): void => {
+    if (!isProductMedia(element)) return;
+    if (add) pageMedia.add(element);
+    else pageMedia.delete(element);
+  };
+  update(node);
+  node.querySelectorAll('img,video').forEach(update);
+}
+
+function updateMediaRegistry(records: MutationRecord[]): void {
+  for (const record of records) {
+    if (record.type !== 'childList') continue;
+    record.addedNodes.forEach((node) => updateMediaTree(node, true));
+    record.removedNodes.forEach((node) => updateMediaTree(node, false));
+  }
+}
 
 function validImageUrl(candidate?: string | null): string {
   if (!candidate) return '';
@@ -59,6 +83,32 @@ function candidateFor(media: ProductMedia, card: HTMLElement): ProductCandidate 
   return image && media.isConnected ? { media, imageUrl: image, card } : undefined;
 }
 
+function candidateAtPoint(x: number, y: number): ProductCandidate | undefined {
+  const hitOrder = new Map<Element, number>();
+  document.elementsFromPoint(x, y).forEach((element, index) => {
+    if (isProductMedia(element)) hitOrder.set(element, index);
+  });
+
+  const candidates: Array<{ candidate: ProductCandidate; hitOrder: number; area: number }> = [];
+  for (const media of pageMedia) {
+    if (!media.isConnected) {
+      pageMedia.delete(media);
+      continue;
+    }
+    if (!mediaUrl(media)) continue;
+    if (!coversPoint(media, x, y)) continue;
+    const style = getComputedStyle(media);
+    if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) continue;
+    const candidate = candidateFor(media, cardFor(media));
+    if (!candidate) continue;
+    const rect = media.getBoundingClientRect();
+    candidates.push({ candidate, hitOrder: hitOrder.get(media) ?? Number.MAX_SAFE_INTEGER, area: rect.width * rect.height });
+  }
+
+  candidates.sort((a, b) => a.hitOrder - b.hitOrder || a.area - b.area);
+  return candidates[0]?.candidate;
+}
+
 function resolveCandidate(target: Element | null, x: number, y: number): ProductCandidate | undefined {
   if (!target || host?.contains(target)) return undefined;
   const card = cardFor(target);
@@ -72,7 +122,7 @@ function resolveCandidate(target: Element | null, x: number, y: number): Product
     (item instanceof HTMLImageElement || item instanceof HTMLVideoElement) && coversPoint(item, x, y));
   const ranked = media.map((item) => candidateFor(item, card)).filter((item): item is ProductCandidate => Boolean(item));
   ranked.sort((a, b) => Number(b.media instanceof HTMLVideoElement) - Number(a.media instanceof HTMLVideoElement));
-  return ranked[0];
+  return ranked[0] ?? candidateAtPoint(x, y);
 }
 
 function productId(candidate: ProductCandidate): string {
@@ -168,7 +218,7 @@ function installButton(): void {
 
 function updatePointer(event: PointerEvent): void { pointerX = event.clientX; pointerY = event.clientY; }
 function onPointerOver(event: PointerEvent): void { updatePointer(event); if (isButtonTarget(event.target)) return; showCandidate(resolveCandidate(event.target instanceof Element ? event.target : null, pointerX, pointerY)); }
-function onPointerMove(event: PointerEvent): void { updatePointer(event); if (isButtonTarget(event.target)) return; showCandidate(resolveCandidate(event.target instanceof Element ? event.target : null, pointerX, pointerY)); }
+function onPointerMove(event: PointerEvent): void { updatePointer(event); if (isButtonTarget(event.target)) return; schedulePointerRefresh(); }
 function onPointerOut(event: PointerEvent): void {
   updatePointer(event);
   if (isButtonTarget(event.relatedTarget)) return;
@@ -185,6 +235,7 @@ function onTogglePanel(message: unknown): boolean {
 
 export function installTemuProductSearch(): void {
   installButton();
+  updateMediaTree(document.documentElement, true);
   document.addEventListener('pointerover', onPointerOver, true);
   document.addEventListener('pointermove', onPointerMove, true);
   document.addEventListener('pointerout', onPointerOut, true);
@@ -192,6 +243,7 @@ export function installTemuProductSearch(): void {
   window.addEventListener('scroll', schedulePointerRefresh, true);
   window.addEventListener('resize', schedulePointerRefresh);
   const observer = new MutationObserver((records) => {
+    updateMediaRegistry(records);
     if (records.some((record) => record.type === 'childList' || IMAGE_ATTRIBUTES.includes(record.attributeName ?? ''))) schedulePointerRefresh();
   });
   observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: IMAGE_ATTRIBUTES });
