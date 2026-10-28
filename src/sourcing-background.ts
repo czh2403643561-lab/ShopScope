@@ -28,7 +28,7 @@ export function isSourcingMessage(message: unknown): boolean {
 
 export async function handleSourcingMessage(message: any, sender: chrome.runtime.MessageSender): Promise<unknown> {
   await recoveryPromise;
-  if (message.type === 'START_1688_IMAGE_SEARCH') return startImageSearch(message.product, message.query_image_data_url, sender.tab?.id);
+  if (message.type === 'START_1688_IMAGE_SEARCH') return startImageSearch(message.product, message.query_image_data_url, sender.tab?.id, message.request_id);
   if (message.type === 'CANCEL_1688_IMAGE_SEARCH') { await cancelCurrentJob(); return { ok: true }; }
   if (message.type === 'GET_1688_IMAGE_SEARCH_JOB') return { ok: true, job: currentJob && (!sender.tab?.id || currentJob.source_tab_id === sender.tab.id) ? currentJob : undefined };
   if (message.type === 'OPEN_1688_LOGIN') {
@@ -83,15 +83,16 @@ export function handleSourcingWindowRemoved(windowId: number): void {
   }
 }
 
-async function startImageSearch(rawProduct: SourcingProductInput | undefined, rawDataUrl: unknown, sourceTabId?: number): Promise<{ ok: boolean; job?: ImageSearchJob; error?: string }> {
+async function startImageSearch(rawProduct: SourcingProductInput | undefined, rawDataUrl: unknown, sourceTabId?: number, rawRequestId?: unknown): Promise<{ ok: boolean; job?: ImageSearchJob; error?: string }> {
   const productId = String(rawProduct?.product_id ?? '').slice(0, 160) || `temu-${Date.now()}`;
   const imageUrl = String(rawProduct?.image_url ?? '');
   if (!imageUrl || !isTemuImageUrl(imageUrl)) return { ok: false, error: 'Temu 商品图片地址无效或暂不支持。' };
   await cancelCurrentJob();
   const token = ++generation;
   const timestamp = now();
+  const requestId = typeof rawRequestId === 'string' && rawRequestId.length <= 100 ? rawRequestId : undefined;
   currentJob = {
-    id: `${productId}-${Date.now()}`, source_product_id: productId, source_title: String(rawProduct?.title ?? 'Temu商品'),
+    id: requestId || `${productId}-${Date.now()}`, client_request_id: requestId, source_product_id: productId, source_title: String(rawProduct?.title ?? 'Temu商品'),
     source_image_url: imageUrl,
     query_image_data_url: typeof rawDataUrl === 'string' && rawDataUrl.startsWith('data:image/') ? rawDataUrl : '',
     source_tab_id: sourceTabId, state: 'preparing-image', results: [], next_page: 1, has_more: false,
@@ -324,7 +325,6 @@ async function broadcastJob(): Promise<void> {
   const job = structuredClone(currentJob);
   await chrome.storage.session.set({ [SESSION_KEY]: job }).catch(() => undefined);
   if (job.source_tab_id !== undefined) void chrome.tabs.sendMessage(job.source_tab_id, { type: 'SOURCING_JOB_UPDATED', job }).catch(() => undefined);
-  void chrome.runtime.sendMessage({ type: 'SOURCING_JOB_UPDATED', job }).catch(() => undefined);
 }
 
 async function restoreSourcingSession(): Promise<void> {

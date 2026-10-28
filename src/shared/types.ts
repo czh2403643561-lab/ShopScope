@@ -50,6 +50,7 @@ export interface SourcingDiagnostics {
 
 export interface ImageSearchJob {
   id: string;
+  client_request_id?: string;
   source_product_id: string;
   source_title: string;
   source_image_url: string;

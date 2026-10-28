@@ -77,15 +77,19 @@ async function firstUseNotice(): Promise<boolean> {
 }
 
 export async function startSourcingSearch(product: SourcingProduct, queryImageDataUrl?: string): Promise<void> {
-  ensureHost(); collapsed = false; cropMode = false; showNotice = await firstUseNotice();
+  ensureHost(); collapsed = false; cropMode = false; showNotice = false;
+  const requestId = crypto.randomUUID();
   const timestamp = new Date().toISOString();
-  currentJob = { id: `pending-${Date.now()}`, source_product_id: product.product_id, source_title: product.title, source_image_url: product.image_url, query_image_data_url: queryImageDataUrl ?? '', state: 'preparing-image', results: [], next_page: 1, has_more: false, official_search_url: '', created_at: timestamp, updated_at: timestamp };
+  currentJob = { id: requestId, client_request_id: requestId, source_product_id: product.product_id, source_title: product.title, source_image_url: product.image_url, query_image_data_url: queryImageDataUrl ?? '', state: 'preparing-image', results: [], next_page: 1, has_more: false, official_search_url: '', created_at: timestamp, updated_at: timestamp };
   render();
-  const response = await chrome.runtime.sendMessage({ type: 'START_1688_IMAGE_SEARCH', product, query_image_data_url: queryImageDataUrl }).catch((error) => ({ ok: false, error: String(error) }));
+  void firstUseNotice().then((notice) => { if (currentJob?.client_request_id === requestId) { showNotice = notice; render(); } });
+  const response = await chrome.runtime.sendMessage({ type: 'START_1688_IMAGE_SEARCH', product, request_id: requestId, query_image_data_url: queryImageDataUrl }).catch((error) => ({ ok: false, error: String(error) }));
+  if (currentJob?.client_request_id !== requestId) return;
   if (!response?.ok && currentJob) { currentJob.state = 'failed'; currentJob.error = response?.error || '无法启动1688图搜。'; render(); }
 }
 
 export function handleSourcingJobUpdate(job: ImageSearchJob): void {
+  if (currentJob?.client_request_id && job.client_request_id !== currentJob.client_request_id) return;
   if (!host?.isConnected && job.state !== 'cancelled') ensureHost();
   currentJob = job; render();
 }

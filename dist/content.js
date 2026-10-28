@@ -96,11 +96,19 @@
     ensureHost();
     collapsed = false;
     cropMode = false;
-    showNotice = await firstUseNotice();
+    showNotice = false;
+    const requestId = crypto.randomUUID();
     const timestamp = (/* @__PURE__ */ new Date()).toISOString();
-    currentJob = { id: `pending-${Date.now()}`, source_product_id: product.product_id, source_title: product.title, source_image_url: product.image_url, query_image_data_url: queryImageDataUrl ?? "", state: "preparing-image", results: [], next_page: 1, has_more: false, official_search_url: "", created_at: timestamp, updated_at: timestamp };
+    currentJob = { id: requestId, client_request_id: requestId, source_product_id: product.product_id, source_title: product.title, source_image_url: product.image_url, query_image_data_url: queryImageDataUrl ?? "", state: "preparing-image", results: [], next_page: 1, has_more: false, official_search_url: "", created_at: timestamp, updated_at: timestamp };
     render();
-    const response = await chrome.runtime.sendMessage({ type: "START_1688_IMAGE_SEARCH", product, query_image_data_url: queryImageDataUrl }).catch((error) => ({ ok: false, error: String(error) }));
+    void firstUseNotice().then((notice) => {
+      if (currentJob?.client_request_id === requestId) {
+        showNotice = notice;
+        render();
+      }
+    });
+    const response = await chrome.runtime.sendMessage({ type: "START_1688_IMAGE_SEARCH", product, request_id: requestId, query_image_data_url: queryImageDataUrl }).catch((error) => ({ ok: false, error: String(error) }));
+    if (currentJob?.client_request_id !== requestId) return;
     if (!response?.ok && currentJob) {
       currentJob.state = "failed";
       currentJob.error = response?.error || "\u65E0\u6CD5\u542F\u52A81688\u56FE\u641C\u3002";
@@ -108,6 +116,7 @@
     }
   }
   function handleSourcingJobUpdate(job) {
+    if (currentJob?.client_request_id && job.client_request_id !== currentJob.client_request_id) return;
     if (!host?.isConnected && job.state !== "cancelled") ensureHost();
     currentJob = job;
     render();
@@ -276,6 +285,7 @@
   // src/temu-product-search.ts
   var BUTTON_ID = "shopscope-temu-image-search-button";
   var PRODUCT_PATH = /(?:^|\/)(?:product|goods|product_image|product-detail)\//i;
+  var IMAGE_ATTRIBUTES = ["src", "srcset", "data-src", "data-original", "data-lazy-src"];
   var CARD_SELECTORS = [
     "[data-goods-id]",
     "[data-product-id]",
@@ -286,22 +296,37 @@
   ].join(",");
   var host2;
   var activeImage;
+  var hoveredImage;
+  var pointerX = 0;
+  var pointerY = 0;
+  var refreshScheduled = false;
+  function imageUrl(image) {
+    const candidates = [
+      image.currentSrc,
+      image.getAttribute("src"),
+      image.getAttribute("data-src"),
+      image.getAttribute("data-original"),
+      image.getAttribute("data-lazy-src")
+    ];
+    return candidates.find((candidate) => {
+      if (!candidate) return false;
+      try {
+        const url = new URL(candidate, location.href);
+        return url.protocol === "https:" && /(^|\.)kwcdn\.com$/i.test(url.hostname) && PRODUCT_PATH.test(url.pathname);
+      } catch {
+        return false;
+      }
+    }) ?? "";
+  }
   function productImage(image) {
-    if (!image.isConnected) return false;
-    const raw = image.currentSrc || image.getAttribute("src") || image.getAttribute("data-src") || "";
-    if (!raw) return false;
-    try {
-      const url = new URL(raw, location.href);
-      return /(^|\.)kwcdn\.com$/i.test(url.hostname) && PRODUCT_PATH.test(url.pathname);
-    } catch {
-      return false;
-    }
+    return image.isConnected && Boolean(imageUrl(image));
   }
   function productCard(image) {
     return image.closest(CARD_SELECTORS) ?? image.parentElement ?? image;
   }
-  function productId(image, card) {
-    for (const anchor of [image.closest("a"), ...card.querySelectorAll("a")]) {
+  function productId(image, card, rawImageUrl) {
+    const anchors = [image.closest("a"), ...card.querySelectorAll("a")];
+    for (const anchor of anchors) {
       if (!anchor?.href) continue;
       try {
         const url = new URL(anchor.href, location.href);
@@ -314,16 +339,20 @@
       } catch {
       }
     }
-    return image.dataset.goodsId || image.dataset.productId || image.currentSrc.slice(-80) || `temu-${Date.now()}`;
+    return image.dataset.goodsId || image.dataset.productId || rawImageUrl.slice(-80) || `temu-${Date.now()}`;
   }
   function productSnapshot(image) {
-    if (!productImage(image)) return void 0;
+    const rawImageUrl = imageUrl(image);
+    if (!image.isConnected || !rawImageUrl) return void 0;
     const card = productCard(image);
-    const imageUrl = canonicalizeUrl(image.currentSrc || image.getAttribute("src") || image.getAttribute("data-src") || "");
-    if (!imageUrl) return void 0;
+    const canonicalImageUrl = canonicalizeUrl(rawImageUrl);
+    if (!canonicalImageUrl) return void 0;
     const alt = cleanText(image.alt);
     const title = alt && alt.toLowerCase() !== "image" ? alt : cleanText(image.getAttribute("title") || card.querySelector("[title]")?.getAttribute("title") || card.textContent).slice(0, 180) || "Temu\u5546\u54C1";
-    return { product_id: productId(image, card), title, image_url: imageUrl };
+    return { product_id: productId(image, card, canonicalImageUrl), title, image_url: canonicalImageUrl };
+  }
+  function buttonWidth() {
+    return host2?.shadowRoot?.querySelector("button")?.getBoundingClientRect().width || 112;
   }
   function positionButton(image) {
     if (!host2) return;
@@ -332,13 +361,43 @@
       hideButton();
       return;
     }
+    const width = buttonWidth();
     host2.style.display = "block";
-    host2.style.left = `${Math.min(innerWidth - 40, Math.max(4, rect.right - 38))}px`;
+    host2.style.left = `${Math.max(4, Math.min(innerWidth - width - 4, rect.right - width - 6))}px`;
     host2.style.top = `${Math.max(4, rect.top + 6)}px`;
   }
-  function hideButton() {
+  function isButtonTarget(target) {
+    if (!(target instanceof Node) || !host2) return false;
+    return target === host2 || host2.contains(target) || target.getRootNode() === host2.shadowRoot;
+  }
+  function hideButton(clearHover = false) {
     if (host2 && !host2.matches(":focus-within")) host2.style.display = "none";
     activeImage = void 0;
+    if (clearHover) hoveredImage = void 0;
+  }
+  function showForImage(image) {
+    hoveredImage = image;
+    if (!productImage(image)) {
+      if (activeImage) hideButton();
+      return;
+    }
+    activeImage = image;
+    positionButton(image);
+  }
+  function refreshUnderPointer() {
+    refreshScheduled = false;
+    if (isButtonTarget(document.elementFromPoint(pointerX, pointerY))) return;
+    const target = document.elementFromPoint(pointerX, pointerY);
+    if (target instanceof HTMLImageElement) {
+      showForImage(target);
+    } else {
+      hideButton(true);
+    }
+  }
+  function schedulePointerRefresh() {
+    if (refreshScheduled) return;
+    refreshScheduled = true;
+    requestAnimationFrame(refreshUnderPointer);
   }
   function installButton() {
     if (host2?.isConnected) return;
@@ -347,12 +406,12 @@
     host2.style.cssText = "position:fixed;z-index:2147483645;display:none;pointer-events:auto;";
     const shadow2 = host2.attachShadow({ mode: "open" });
     const style = document.createElement("style");
-    style.textContent = `button{display:grid;place-items:center;width:30px;height:30px;padding:0;border:1px solid rgba(0,0,0,.18);border-radius:50%;background:#fff;color:#146b55;box-shadow:0 2px 8px rgba(0,0,0,.24);cursor:pointer}button:hover{background:#e9f5f0}svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2.2}`;
+    style.textContent = `button{display:flex;align-items:center;justify-content:center;gap:5px;height:30px;padding:0 8px;border:1px solid rgba(0,0,0,.18);border-radius:16px;background:#fff;color:#146b55;box-shadow:0 2px 8px rgba(0,0,0,.24);cursor:pointer;font:600 12px/1 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;white-space:nowrap}button:hover{background:#e9f5f0}svg{width:15px;height:15px;flex:none;fill:none;stroke:currentColor;stroke-width:2.2}`;
     const button = document.createElement("button");
     button.type = "button";
     button.title = "\u7528\u6B64\u5546\u54C1\u56FE\u7247\u641C\u7D221688\u8D27\u6E90";
-    button.setAttribute("aria-label", button.title);
-    button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.8"></circle><path d="m16 16 5 5"></path></svg>';
+    button.setAttribute("aria-label", "1688\u627E\u540C\u6B3E");
+    button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.8"></circle><path d="m16 16 5 5"></path></svg><span>1688\u627E\u540C\u6B3E</span>';
     button.addEventListener("pointerdown", (event) => event.stopPropagation());
     button.addEventListener("click", (event) => {
       event.preventDefault();
@@ -360,21 +419,23 @@
       const product = activeImage && productSnapshot(activeImage);
       if (product) void startSourcingSearch(product);
     });
-    host2.addEventListener("pointerleave", hideButton);
+    host2.addEventListener("pointerleave", () => hideButton(true));
     shadow2.append(style, button);
     document.documentElement.appendChild(host2);
   }
   function onPointerOver(event) {
-    const target = event.target;
-    if (!(target instanceof HTMLImageElement) || !productImage(target)) return;
-    activeImage = target;
-    positionButton(target);
+    if (event.target instanceof HTMLImageElement) showForImage(event.target);
+  }
+  function onPointerMove(event) {
+    pointerX = event.clientX;
+    pointerY = event.clientY;
+    if (event.target instanceof HTMLImageElement) showForImage(event.target);
+  }
+  function onPointerOut(event) {
+    if (event.target === hoveredImage && !isButtonTarget(event.relatedTarget)) hideButton(true);
   }
   function onFocusIn(event) {
-    const target = event.target;
-    if (!(target instanceof HTMLImageElement) || !productImage(target)) return;
-    activeImage = target;
-    positionButton(target);
+    if (event.target instanceof HTMLImageElement) showForImage(event.target);
   }
   function onTogglePanel(message) {
     if (message?.type !== "TOGGLE_SHOP_SCOPE_PANEL") return false;
@@ -384,20 +445,23 @@
   function installTemuProductSearch() {
     installButton();
     document.addEventListener("pointerover", onPointerOver, true);
-    document.addEventListener("pointerout", (event) => {
-      const target = event.target;
-      if (target === activeImage && event.relatedTarget !== host2) hideButton();
-    }, true);
+    document.addEventListener("pointermove", onPointerMove, true);
+    document.addEventListener("pointerout", onPointerOut, true);
     document.addEventListener("focusin", onFocusIn, true);
-    document.addEventListener("focusout", (event) => {
-      if (event.target === activeImage && event.relatedTarget !== host2) hideButton();
-    }, true);
-    window.addEventListener("scroll", () => activeImage && positionButton(activeImage), true);
-    window.addEventListener("resize", () => activeImage && positionButton(activeImage));
+    document.addEventListener("focusout", onPointerOut, true);
+    window.addEventListener("scroll", schedulePointerRefresh, true);
+    window.addEventListener("resize", schedulePointerRefresh);
+    const observer = new MutationObserver((records) => {
+      if (hoveredImage && records.some((record) => record.target === hoveredImage && IMAGE_ATTRIBUTES.includes(record.attributeName ?? ""))) {
+        showForImage(hoveredImage);
+      }
+      if (records.some((record) => record.type === "childList")) schedulePointerRefresh();
+    });
+    observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: IMAGE_ATTRIBUTES });
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (onTogglePanel(message)) {
         sendResponse({ ok: true });
-        return true;
+        return false;
       }
       return void 0;
     });

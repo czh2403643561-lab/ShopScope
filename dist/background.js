@@ -574,7 +574,7 @@
   }
   async function handleSourcingMessage(message, sender) {
     await recoveryPromise;
-    if (message.type === "START_1688_IMAGE_SEARCH") return startImageSearch(message.product, message.query_image_data_url, sender.tab?.id);
+    if (message.type === "START_1688_IMAGE_SEARCH") return startImageSearch(message.product, message.query_image_data_url, sender.tab?.id, message.request_id);
     if (message.type === "CANCEL_1688_IMAGE_SEARCH") {
       await cancelCurrentJob();
       return { ok: true };
@@ -638,15 +638,17 @@
       void broadcastJob();
     }
   }
-  async function startImageSearch(rawProduct, rawDataUrl, sourceTabId) {
+  async function startImageSearch(rawProduct, rawDataUrl, sourceTabId, rawRequestId) {
     const productId = String(rawProduct?.product_id ?? "").slice(0, 160) || `temu-${Date.now()}`;
     const imageUrl = String(rawProduct?.image_url ?? "");
     if (!imageUrl || !isTemuImageUrl(imageUrl)) return { ok: false, error: "Temu \u5546\u54C1\u56FE\u7247\u5730\u5740\u65E0\u6548\u6216\u6682\u4E0D\u652F\u6301\u3002" };
     await cancelCurrentJob();
     const token = ++generation;
     const timestamp = now();
+    const requestId = typeof rawRequestId === "string" && rawRequestId.length <= 100 ? rawRequestId : void 0;
     currentJob = {
-      id: `${productId}-${Date.now()}`,
+      id: requestId || `${productId}-${Date.now()}`,
+      client_request_id: requestId,
       source_product_id: productId,
       source_title: String(rawProduct?.title ?? "Temu\u5546\u54C1"),
       source_image_url: imageUrl,
@@ -886,7 +888,6 @@
     const job = structuredClone(currentJob);
     await chrome.storage.session.set({ [SESSION_KEY]: job }).catch(() => void 0);
     if (job.source_tab_id !== void 0) void chrome.tabs.sendMessage(job.source_tab_id, { type: "SOURCING_JOB_UPDATED", job }).catch(() => void 0);
-    void chrome.runtime.sendMessage({ type: "SOURCING_JOB_UPDATED", job }).catch(() => void 0);
   }
   async function restoreSourcingSession() {
     const stored = await chrome.storage.session.get(SESSION_KEY).catch(() => ({}));
